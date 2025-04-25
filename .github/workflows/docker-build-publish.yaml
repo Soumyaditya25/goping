@@ -15,11 +15,11 @@ on:
 # Global defaults for what used to be "inputs"
 env:
   DOCKERFILE: Dockerfile
-  PACKAGE_NAME: 'goping'            
+  PACKAGE_NAME: 'goping'
   DOCKER_CONTEXT: '.'
-  CHECKOUT_REF: ''           
-  BUILD_ARGS: ''              
-  RUNNER_LABEL: ubuntu-latest
+  CHECKOUT_REF: ''
+  BUILD_ARGS: ''
+  RUNNER_LABEL: ubuntu-latest   
   GITHUB_REG: ghcr.io
   MAINTAINER: ${{ github.repository_owner }}
   DESCRIPTION: "${{ github.repository_owner }} repository ${{ github.repository }}"
@@ -27,14 +27,15 @@ env:
 jobs:
   prepare-env:
     name: Prepare environment
-    runs-on: ${{ env.RUNNER_LABEL }}
+    runs-on: ubuntu-latest     
     outputs:
-      repo_owner: ${{ steps.set_env.outputs.repo_owner }}
-      short_sha:  ${{ steps.set_env.outputs.short_sha }}
-      image_name: ${{ steps.set_env.outputs.image_name }}
+      repo_owner:    ${{ steps.set_env.outputs.repo_owner }}
+      short_sha:     ${{ steps.set_env.outputs.short_sha }}
+      image_name:    ${{ steps.set_env.outputs.image_name }}
       build_for_pr:    ${{ steps.set_logic.outputs.build_for_pr }}
       build_for_merge: ${{ steps.set_logic.outputs.build_for_merge }}
       not_a_fork:      ${{ steps.set_logic.outputs.not_a_fork }}
+ 
 
     steps:
       - name: Checkout code
