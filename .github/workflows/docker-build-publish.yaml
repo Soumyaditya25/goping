@@ -1,22 +1,197 @@
 name: Docker Build & Publish
 
-# Trigger on all push events, new semantic version tags, and all PRs
+# Trigger on any branch/tag push or any PR
 on:
   push:
     branches:
-      - "**"
+      - '**'
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+"
-      - "v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+"
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-alpha.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-beta.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+'
   pull_request:
 
+# Global defaults for what used to be "inputs"
+env:
+  DOCKERFILE: Dockerfile
+  PACKAGE_NAME: 'goping'            
+  DOCKER_CONTEXT: '.'
+  CHECKOUT_REF: ''           
+  BUILD_ARGS: ''              
+  RUNNER_LABEL: ubuntu-latest
+  GITHUB_REG: ghcr.io
+  MAINTAINER: ${{ github.repository_owner }}
+  DESCRIPTION: "${{ github.repository_owner }} repository ${{ github.repository }}"
+
 jobs:
-  docker-security-build:
+  prepare-env:
+    name: Prepare environment
+    runs-on: ${{ env.RUNNER_LABEL }}
+    outputs:
+      repo_owner: ${{ steps.set_env.outputs.repo_owner }}
+      short_sha:  ${{ steps.set_env.outputs.short_sha }}
+      image_name: ${{ steps.set_env.outputs.image_name }}
+      build_for_pr:    ${{ steps.set_logic.outputs.build_for_pr }}
+      build_for_merge: ${{ steps.set_logic.outputs.build_for_merge }}
+      not_a_fork:      ${{ steps.set_logic.outputs.not_a_fork }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # if CHECKOUT_REF is empty, GitHub defaults to the triggering ref
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Set up repo vars
+        id: set_env
+        run: |
+          REPO_OWNER=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+          REPO_NAME=$(echo "${GITHUB_REPOSITORY}" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
+          if [[ $REPO_NAME == ".github" ]]; then
+            REPO_NAME="github"
+          fi
+
+          # Determine final image/package name
+          if [[ -n "${PACKAGE_NAME}" ]]; then
+            VALID_NAME=$(echo "${PACKAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+          else
+            VALID_NAME=$REPO_NAME
+          fi
+          if [[ ! $VALID_NAME =~ ^[A-Za-z0-9-]+$ ]]; then
+            echo "ERROR: Invalid PACKAGE_NAME '${VALID_NAME}'"
+            exit 1
+          fi
+
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-8)
+
+          echo "repo_owner=${REPO_OWNER}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}"   >> "$GITHUB_OUTPUT"
+          echo "image_name=${VALID_NAME}" >> "$GITHUB_OUTPUT"
+          echo "REPO_OWNER=${REPO_OWNER}" >> "$GITHUB_ENV"
+          echo "SHORT_SHA=${SHORT_SHA}"   >> "$GITHUB_ENV"
+
+      - name: Compute build logic
+        id: set_logic
+        run: |
+          echo "build_for_pr=$([[ '${{ github.event_name }}' == 'pull_request' ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "build_for_merge=$(( '${{ github.ref }}' == 'refs/heads/main' || '${{ github.ref }}' == 'refs/heads/master' || [[ '${{ github.ref }}' =~ ^refs/tags/v ]] ) && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "not_a_fork=$([[ '${{ github.event.pull_request.head.repo.full_name }}' == '${{ github.event.pull_request.base.repo.full_name }}' ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  logic-check:
+    name: Sanity-check build logic
+    needs: prepare-env
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dump logic variables
+        run: |
+          echo "event_name: ${{ github.event_name }}"
+          echo "ref:        ${{ github.ref }}"
+          echo "build_for_pr:    ${{ needs.prepare-env.outputs.build_for_pr }}"
+          echo "build_for_merge: ${{ needs.prepare-env.outputs.build_for_merge }}"
+          echo "not_a_fork:      ${{ needs.prepare-env.outputs.not_a_fork }}"
+
+      - name: Fail if logic is inconsistent
+        if: |
+          needs.prepare-env.outputs.build_for_pr == needs.prepare-env.outputs.build_for_merge
+          && needs.prepare-env.outputs.build_for_pr != 'false'
+        run: |
+          echo "::error::Both build_for_pr and build_for_merge are true – aborting."
+          exit 1
+
+  docker-build:
+    name: Build & Push Docker Images
+    needs: [prepare-env, logic-check]
+    runs-on: ubuntu-latest
+    if: needs.prepare-env.outputs.not_a_fork == 'true'
     permissions:
       contents: write
       packages: write
-    uses: ./.github/workflows/reusable_dockerfile_pipeline.yml
-    with:
-      dockerfile: Dockerfile
+    strategy:
+      fail-fast: false
+      matrix:
+        registry:
+          - name: DockerHub
+            url: docker.io
+            owner: celestiaorg
+            user_secret: DOCKERHUB_USERNAME
+            token_secret: DOCKERHUB_TOKEN
+            run_on_pr: false
+          - name: GHCR
+            url: ghcr.io
+            owner: ${{ needs.prepare-env.outputs.repo_owner }}
+            user_secret: GITHUB_TOKEN
+            token_secret: GITHUB_TOKEN
+            run_on_pr: true
+
+    steps:
+      - name: Determine if we should run
+        id: should_run
+        run: |
+          RUN=${{ matrix.registry.run_on_pr == needs.prepare-env.outputs.build_for_pr || needs.prepare-env.outputs.build_for_merge == 'true' }}
+          echo "run=$RUN" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout code
+        if: steps.should_run.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CHECKOUT_REF }}
+
+      - name: Log in to ${{ matrix.registry.name }}
+        if: steps.should_run.outputs.run == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ matrix.registry.url }}
+          username: ${{ secrets[matrix.registry.user_secret] }}
+          password: ${{ secrets[matrix.registry.token_secret] }}
+
+      - name: Extract Docker metadata
+        if: steps.should_run.outputs.run == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        env:
+          OUTPUT_SHORT_SHA: ${{ needs.prepare-env.outputs.short_sha }}
+          OUTPUT_IMAGE_NAME: ${{ needs.prepare-env.outputs.image_name }}
+        with:
+          images: ${{ matrix.registry.url }}/${{ matrix.registry.owner }}/${{ env.OUTPUT_IMAGE_NAME }}
+          tags: |
+            type=raw,value={{sha}}
+            type=semver,pattern={{raw}}
+            type=ref,enable=true,prefix=pr-,event=pr
+          labels: |
+            maintainer=${{ env.MAINTAINER }}
+            commitUrl=https://github.com/${{ github.repository }}/commit/${{ github.sha }}
+            dockerPull=docker pull ${{ matrix.registry.url }}/${{ matrix.registry.owner }}/${{ env.OUTPUT_IMAGE_NAME }}:${{ env.SHORT_SHA }}
+            org.opencontainers.image.description=${{ env.DESCRIPTION }}
+
+      - name: Set up QEMU
+        if: steps.should_run.outputs.run == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        if: steps.should_run.outputs.run == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Convert build args
+        if: env.BUILD_ARGS && steps.should_run.outputs.run == 'true'
+        id: convert_args
+        run: |
+          echo 'converted<<EOF'
+          echo "${BUILD_ARGS}" | xargs -n1
+          echo 'EOF'
+          echo "::set-output name=converted::$(cat <<EOF
+$(echo "${BUILD_ARGS}" | xargs -n1)
+EOF
+)"
+
+      - name: Build & Push
+        if: steps.should_run.outputs.run == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.DOCKER_CONTEXT }}
+          file:    ${{ env.DOCKERFILE }}
+          platforms: linux/amd64,linux/arm64
+          push:    true
+          tags:    ${{ steps.meta.outputs.tags }}
+          labels:  ${{ steps.meta.outputs.labels }}
+          build-args: ${{ steps.convert_args.outputs.converted }}
