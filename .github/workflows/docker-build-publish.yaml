@@ -173,16 +173,12 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Convert build args
-        if: env.BUILD_ARGS && steps.should_run.outputs.run == 'true'
+        if: ${{ env.BUILD_ARGS != '' && steps.should_run.outputs.run == 'true' }}
         id: convert_args
         run: |
-          echo 'converted<<EOF'
-          echo "${BUILD_ARGS}" | xargs -n1
-          echo 'EOF'
-          echo "::set-output name=converted::$(cat <<EOF
-$(echo "${BUILD_ARGS}" | xargs -n1)
-EOF
-)"
+         echo "converted<<EOF" >> $GITHUB_OUTPUT
+         echo "${BUILD_ARGS}" | xargs -n1        >> $GITHUB_OUTPUT
+         echo "EOF"                             >> $GITHUB_OUTPUT
 
       - name: Build & Push
         if: steps.should_run.outputs.run == 'true'
